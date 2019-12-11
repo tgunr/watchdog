@@ -1,0 +1,228 @@
+#!/bin/bash 
+### BEGIN INIT INFO
+# Provides:          fwfailsafe
+# Short-Description: Control Firewall Failsafe
+# Description:       Starts or stops the Firewall Watchdog cron job.
+#    Composed of two parts, a small program on a remote server updates a file every 30 seconds.
+#    A script executed by the root crontab check if the watchdog file has been updated every two minutes.
+#    If the watchdog is not updated (as caused by a bad firewall rule) the firewall tables are reset to permit access.
+### END INIT INFO
+
+# Author: Dave Carlton davec@polmicro.net
+#
+# Do NOT "set -e"
+# set -x
+# PATH should only include /usr/* if it runs after the mountnfs.sh script
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+DESC="Start or stop the Firewall watchdog"
+NAME=fwfailsafe
+DAEMON=/root/bin/$NAME
+DAEMON_ARGS=""
+PIDFILE=/var/run/$NAME.pid
+SCRIPTNAME=/root/bin/$NAME
+FW=nftables
+
+# Exit if the package is not installed
+[ -x "$DAEMON" ] || exit 0
+
+# Read configuration variable file if it is present
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+
+# Load the VERBOSE setting and other rcS variables
+. /lib/init/vars.sh
+
+# Define LSB log_* functions.
+# Depend on lsb-base (>= 3.0-6) to ensure that this file is present.
+. /lib/lsb/init-functions
+
+do_help() 
+{
+ echo "$0"
+ echo "Starts or stops the Firewall Watchdog cron job."
+ echo "    Composed of two parts, a small program on a remote server updates a file every 30 seconds."
+ echo "    A script executed by the root crontab checks if the watchdog file has been updated every two minutes."
+ echo "    If the watchdog is not updated (as caused by a bad firewall rule) the firewall tables are reset to permit access."
+ echo
+ echo "On a remote execute this small bash code:"
+ echo "   while true; do ssh root@firewall.undertest.com 'date +%s > /root/watchdog'; date; sleep 30; done"
+ echo
+ echo "On the firewall server execute:"
+ echo "fwfailsafe start|stop|status"
+}
+
+#
+# Function that starts the daemon/service
+#
+do_start()
+{
+	# Return
+	#   0 if daemon has been started
+	#   1 if daemon was already running
+	#   2 if daemon could not be started
+
+  cd /root
+
+  if [[ $FW = iptables ]] ; then
+      let IPTABLE_COUNT=$(iptables -L -n | wc -l)
+      
+      if ((IPTABLE_COUNT < 10 )) ; then 
+  	  echo "NOTICE: It appears your iptables have been reset"
+      fi
+  elif [[ $FW = nftables ]] ; then
+      let NFTABLE_COUNT=$(nft list ruleset |ag table|wc -l)
+      if ((IPTABLE_COUNT == 1 )) ; then 
+  	  echo "NOTICE: It appears your nftables have been reset"
+      fi 
+  else
+      echo "FW is not set, use export FW=nftables or export FW=iptables"
+      exit -1
+  fi
+  if [ -e  watchdog ] ; then
+      rm watchdog
+  fi
+
+       
+      echo "Waiting 60 seconds for watchdog file to appear from remote, you did start one right?"
+      echo "On a remote execute this small bash code:"
+      echo "   while true; do ssh pve.polymicro.net 'date +%s > /root/watchdog'; date; sleep 30; done"
+      echo
+      sleep 60
+      
+  if [[ ! -e watchdog ]] ; then
+  	echo "No watchdog file appeared, on a remote host execute the following:"
+	echo "   while true; do ssh root@firewall.undertest.com 'date +%s > /root/watchdog'; date; sleep 30; done"
+	echo
+  	return 2
+  else
+      echo "This host is protected by the watchdog task running on the remote host."
+      echo "You may begin testing your firewall rules."
+      echo "You may check the status of this host by executing:"
+      echo "    fwfailsafe status"
+      echo "If firewall gets reset by watchdog, don't forget to restart again if you continue to test"
+      echo "otherwise, you may be locked out as the watchdog will not be running after the reset"
+      echo
+  fi
+  
+  if [[ -e watchdog.reset ]] ; then 
+  	rm watchdog.reset
+  fi
+  
+  # if [[ $? == 1 ]] ; then 
+  	# no crontab entry, so make one
+  	# crontab -l | sed -e '$ a\
+# */2 * * * * /root/bin/fwfailsafe-monitor
+  # ' | crontab -
+  # else
+      # set crontab entry to enabled
+      # crontab -l|sed -e 's_^\([#]\{1,\}\)\(\*\/2.*fwfailsafe-monitor\)_\2_' |crontab -
+  # fi
+  
+  echo "Firewall watchdog should now be running"
+  crontab -l|grep "^.*/root/bin/fwfailsafe-monitor"
+  echo
+  echo "  If watchdog file fails to be updated from the remote host, the iptables will be reset"
+  return 0
+
+	# Add code here, if necessary, that waits for the process to be ready
+	# to handle requests from services started subsequently which depend
+	# on this one.  As a last resort, sleep for some time.
+}
+
+#
+# Function that stops the daemon/service
+#
+do_stop()
+{
+	# Return
+	#   0 if daemon has been stopped
+	#   1 if daemon was already stopped
+	#   2 if daemon could not be stopped
+	#   other if a failure occurred
+
+  cd /root
+  
+  echo "You should have stopped your remote watchdog task before executing this script"
+  echo "   otherwise the watchdog file created by the remote host will be created again."
+   
+  echo "Removing watchdog files"
+  if [[ -e  watchdog ]] ; then
+      rm watchdog
+  fi
+  
+  if [[ -e watchdog.reset ]] ; then
+      rm watchdog.reset
+  fi
+  
+  # disable crontab
+  crontab -l | sed 's_.*/root/bin/fwfailsafe-monitor_#&_' | crontab -
+  
+  echo "Firewall watchdog is now stopped"
+  
+  if [[ $FW = iptables ]] ; then
+      let IPTABLE_COUNT=$(iptables -L -n | wc -l)  
+      if ((IPTABLE_COUNT < 10 )) ; then 
+  	  echo "It appears your iptables have been reset, need to reenable firewall?"
+  	  return 9
+      fi
+  elif [[ $FW = nftables ]] ; then
+      let NFTABLE_COUNT=$(nft list ruleset |ag table|wc -l)
+      if ((IPTABLE_COUNT == 1 )) ; then 
+  	  echo "NOTICE: It appears your nftables have been reset, need to reenable firewall?"
+  	  return 9
+      fi 
+  else
+      echo "FW is not set, use export FW=nftables or export FW=iptables"
+      exit -1
+  fi
+  
+}
+
+do_status() {
+  crontab -l|grep "^#.*/root/bin/fwfailsafe-monitor.*"
+  if [[ $? == 1 ]] ; then 
+    echo "Firewall watchdog is running"
+  else
+    echo "Firewall watchdog is not running"
+  fi
+  if [[ $FW = iptables ]] ; then
+      let IPTABLE_COUNT=$(iptables -L -n | wc -l)  
+      if ((IPTABLE_COUNT < 10 )) ; then 
+  	  echo "It appears your iptables have been reset"
+      fi
+  elif [[ $FW = nftables ]] ; then
+      let NFTABLE_COUNT=$(nft list ruleset |ag table|wc -l)
+      if ((IPTABLE_COUNT == 1 )) ; then 
+  	  echo "NOTICE: It appears your nftables have been reset"
+      fi 
+  else
+      echo "FW is not set, use export FW=nftables or export FW=iptables"
+  fi
+}
+
+case "$1" in
+  start)
+       do_start
+       ;;
+  stop)
+       do_stop 
+       ;;
+  restart)
+      do_stop
+      do_start
+      ;;
+  status)
+       do_status 
+       ;;
+  help)
+       do_help
+       ;;
+  *)
+      echo "Usage: $SCRIPTNAME {start|stop|restart|status|help}" >&2
+      if [[ $FW != iptables && $FW != nftables ]] ; then
+	  echo "FW is not set, use export FW=nftables or export FW=iptables"
+      fi
+      exit 3
+      ;;
+esac
+
+:

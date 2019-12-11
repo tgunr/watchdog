@@ -1,0 +1,7 @@
+#!/bin/bash
+while true
+do
+    ssh pve  'date +%s > /root/watchdog'
+    date
+    sleep 30
+done
